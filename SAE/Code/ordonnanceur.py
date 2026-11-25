@@ -4,8 +4,7 @@
 # À chaque pas de temps :
 #   1. les processus qui arrivent entrent dans la file d'attente
 #   2. on calcule combien de processeurs on peut alimenter (énergie verte)
-#   3. on donne les processeurs libres aux premiers processus de la file
-#      qui rentrent en RAM
+#   3. on attribue les ressources selon la politique
 #   4. on exécute 1 unité de temps
 
 
@@ -15,8 +14,8 @@ def cle_de_tri(politique, p):
         # date de soumission, puis priorité la plus haute en premier
         return (p["date_soumission"], -p["priorite"])
     if politique == "EDF":
-        # date butoir la plus proche en premier
-        return (p["date_butoir"], -p["priorite"])
+        # date butoir la plus proche en premier, puis priorité décroissante, soumission, ordre
+        return (p["date_butoir"], -p["priorite"], p["date_soumission"], p["_ordre"])
     if politique == "PRIORITE":
         # variante 1 : priorité la plus haute en premier, sans préemption
         return (-p["priorite"], p["date_soumission"])
@@ -24,13 +23,13 @@ def cle_de_tri(politique, p):
 
 def ordonnancer(politique, liste_processus, ressources, energie, quantum=2):
     """Simule une politique. Renvoie (processus, allocations, energie_consommee)."""
-    # copie des processus avec les champs dont on a besoin
     procs = []
-    for p in liste_processus:
+    for i, p in enumerate(liste_processus):
         copie = dict(p)
         copie["reste"] = p["duree"]   # temps d'exécution restant
         copie["debut"] = None         # première date d'exécution
         copie["fin"] = None           # date de fin
+        copie["_ordre"] = i           # position initiale pour départager les égalités
         procs.append(copie)
 
     cpus = ressources["processeur"]
@@ -39,73 +38,122 @@ def ordonnancer(politique, liste_processus, ressources, energie, quantum=2):
 
     file_attente = []   # processus prêts, en attente d'un processeur
     en_cours = {}       # processeur -> processus en train de s'exécuter
+    residents = []      # utilisé par EDF : processus démarrés gardant CPU et RAM jusqu'à la fin
+    cpu_libres = list(cpus)
+    ram_libre = ram_totale
     tranche = {}        # id processus -> nombre de pas consécutifs (pour RR)
     pas_executes = []   # liste de (t, id_processus, processeur)
     energie_consommee = 0
 
     for t in range(len(energie)):
 
-        # 1. arrivée des nouveaux processus (triés par priorité si même date)
-        arrives = [p for p in procs if p["date_soumission"] == t]
-        arrives.sort(key=lambda p: -p["priorite"])
-        file_attente.extend(arrives)
-
-        # Round Robin : un processus qui a fini son quantum retourne en fin de file
-        if politique == "RR":
-            for cpu, p in list(en_cours.items()):
-                if tranche[p["id"]] >= quantum:
-                    del en_cours[cpu]
+        # 1. arrivée des nouveaux processus
+        if politique == "EDF":
+            for p in procs:
+                if p["date_soumission"] == t and p["ram"] <= ram_totale:
                     file_attente.append(p)
+            file_attente.sort(key=lambda p: cle_de_tri("EDF", p))
+        else:
+            arrives = [p for p in procs if p["date_soumission"] == t]
+            arrives.sort(key=lambda p: -p["priorite"])
+            file_attente.extend(arrives)
 
         # 2. nombre de processeurs alimentables avec l'énergie verte de cet instant
         nb_alimentables = min(len(cpus), energie[t] // energie_par_cpu)
 
-        # si l'énergie a baissé, on suspend les processus en trop
-        # (ils retournent en tête de file)
-        while len(en_cours) > nb_alimentables:
-            cpu = list(en_cours)[-1]
-            p = en_cours.pop(cpu)
-            tranche[p["id"]] = 0
-            file_attente.insert(0, p)
+        # 3. allocation des processeurs
+        if politique == "EDF":
+            # Les processus déjà démarrés (résidents) gardent leur CPU et leur RAM :
+            # ils sont alimentés en premier, du plus urgent au moins urgent
+            residents.sort(key=lambda p: cle_de_tri("EDF", p))
+            actifs = residents[:nb_alimentables]
 
-        # 3. tri de la file (sauf RR qui garde l'ordre d'arrivée)
-        if politique != "RR":
-            file_attente.sort(key=lambda p: cle_de_tri(politique, p))
-
-        # attribution des processeurs libres
-        ram_utilisee = sum(p["ram"] for p in en_cours.values())
-        for cpu in cpus:
-            if len(en_cours) >= nb_alimentables:
-                break
-            if cpu in en_cours:
-                continue
-            # on cherche le premier processus de la file qui rentre en RAM
-            for p in file_attente:
-                if ram_utilisee + p["ram"] <= ram_totale:
-                    file_attente.remove(p)
-                    en_cours[cpu] = p
-                    ram_utilisee += p["ram"]
-                    tranche[p["id"]] = 0
-                    if p["debut"] is None:
-                        p["debut"] = t
+            # S'il reste de l'énergie et des CPU libres, on démarre de nouveaux processus
+            places = min(len(cpu_libres), nb_alimentables - len(actifs))
+            for p in list(file_attente):
+                if places == 0:
                     break
+                if p["ram"] <= ram_libre:
+                    p["_cpu"] = cpu_libres.pop(0)
+                    p["debut"] = t
+                    ram_libre -= p["ram"]
+                    file_attente.remove(p)
+                    residents.append(p)
+                    actifs.append(p)
+                    places -= 1
 
-        # 4. exécution d'une unité de temps
-        for cpu, p in list(en_cours.items()):
-            pas_executes.append((t, p["id"], cpu))
-            p["reste"] -= 1
-            tranche[p["id"]] += 1
-        energie_consommee += len(en_cours) * energie_par_cpu
+            # 4. exécution d'une unité de temps pour les processus actifs
+            for p in actifs:
+                pas_executes.append((t, p["id"], p["_cpu"]))
+                p["reste"] -= 1
+            energie_consommee += len(actifs) * energie_par_cpu
 
-        # fin des processus terminés
-        for cpu, p in list(en_cours.items()):
-            if p["reste"] == 0:
-                p["fin"] = t + 1
-                del en_cours[cpu]
+            # fin des processus terminés et libération des ressources
+            for p in actifs:
+                if p["reste"] == 0:
+                    p["fin"] = t + 1
+                    residents.remove(p)
+                    cpu_libres.append(p["_cpu"])
+                    cpu_libres.sort(key=cpus.index)
+                    ram_libre += p["ram"]
+
+        else:
+            # Round Robin : un processus qui a fini son quantum retourne en fin de file
+            if politique == "RR":
+                for cpu, p in list(en_cours.items()):
+                    if tranche[p["id"]] >= quantum:
+                        del en_cours[cpu]
+                        file_attente.append(p)
+
+            # si l'énergie a baissé, on suspend les processus en trop en tête de file
+            while len(en_cours) > nb_alimentables:
+                cpu = list(en_cours)[-1]
+                p = en_cours.pop(cpu)
+                tranche[p["id"]] = 0
+                file_attente.insert(0, p)
+
+            # tri de la file (sauf RR qui garde l'ordre d'arrivée)
+            if politique != "RR":
+                file_attente.sort(key=lambda p: cle_de_tri(politique, p))
+
+            # attribution des processeurs libres
+            ram_utilisee = sum(p["ram"] for p in en_cours.values())
+            for cpu in cpus:
+                if len(en_cours) >= nb_alimentables:
+                    break
+                if cpu in en_cours:
+                    continue
+                for p in file_attente:
+                    if ram_utilisee + p["ram"] <= ram_totale:
+                        file_attente.remove(p)
+                        en_cours[cpu] = p
+                        ram_utilisee += p["ram"]
+                        tranche[p["id"]] = 0
+                        if p["debut"] is None:
+                            p["debut"] = t
+                        break
+
+            # 4. exécution d'une unité de temps
+            for cpu, p in list(en_cours.items()):
+                pas_executes.append((t, p["id"], cpu))
+                p["reste"] -= 1
+                tranche[p["id"]] += 1
+            energie_consommee += len(en_cours) * energie_par_cpu
+
+            # fin des processus terminés
+            for cpu, p in list(en_cours.items()):
+                if p["reste"] == 0:
+                    p["fin"] = t + 1
+                    del en_cours[cpu]
 
         # tout est fini : on arrête
         if all(p["fin"] is not None for p in procs):
             break
+
+    # nettoyage des champs internes temporaires
+    for p in procs:
+        p.pop("_ordre", None)
+        p.pop("_cpu", None)
 
     return procs, regrouper(pas_executes), energie_consommee
 

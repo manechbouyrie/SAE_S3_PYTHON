@@ -1,6 +1,6 @@
 fichier_processus = processus.csv
-fichier_ressources = ressources.csv
-algorithmes = FIFO,RR
+fichier_ressources = ressources.json
+algorithmes = FIFO,RR,EDF
 fichier_global_FIFO = resultats_fifo_global.csv
 fichier_allocations_FIFO = resultats_fifo_allocations.csv
 fichier_global_RoundRobin = resultats_roundrobin_global.csv
