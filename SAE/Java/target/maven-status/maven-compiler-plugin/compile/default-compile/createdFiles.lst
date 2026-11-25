@@ -1,0 +1,10 @@
+modele\Metriques.class
+modele\Processus.class
+Main.class
+modele\Config.class
+controleur\Controleur.class
+modele\Modele.class
+modele\Allocation.class
+modele\ResultatAlgo.class
+modele\LecteurResultats.class
+modele\Lanceur.class
